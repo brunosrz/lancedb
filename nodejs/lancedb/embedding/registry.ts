@@ -126,8 +126,10 @@ export class EmbeddingFunctionRegistry {
             throw new Error(`Function "${f.name}" not found in registry`);
           }
           const func = await this.get(f.name)!.create(f.model);
+          // Keyed by the column written, not the function: one function can
+          // write several, and keying by name would drop all but the last.
           return [
-            f.name,
+            f.vectorColumn ?? f.name,
             {
               sourceColumn: f.sourceColumn,
               vectorColumn: f.vectorColumn,
