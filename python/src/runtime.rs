@@ -29,12 +29,43 @@ static RUNTIME: AtomicPtr<runtime::Runtime> = AtomicPtr::new(std::ptr::null_mut(
 static RUNTIME_INSTALLING: AtomicBool = AtomicBool::new(false);
 static ATFORK_INSTALLED: AtomicBool = AtomicBool::new(false);
 
+/// Overrides tokio's worker-thread count for the runtime backing every
+/// async binding call.
+///
+/// Tokio defaults to `available_parallelism()`, which does not account for
+/// cgroup CPU quotas: a container limited to 2 CPUs on a 64-core host still
+/// gets 64 worker threads. This mirrors `LANCE_CPU_THREADS` in the `lance`
+/// crate, which exists for the same reason.
+const WORKER_THREADS_ENV: &str = "LANCEDB_TOKIO_WORKER_THREADS";
+
+/// Parses the worker-thread override, or `None` to keep tokio's default.
+///
+/// An unusable value is reported and ignored rather than fatal: refusing to
+/// build a runtime would take down an application over a misconfigured
+/// environment variable, and tokio's default is always a working fallback.
+fn parse_worker_threads(raw: &str) -> Option<usize> {
+    match raw.trim().parse::<usize>() {
+        Ok(n) if n > 0 => Some(n),
+        _ => {
+            log::error!(
+                "Ignoring {WORKER_THREADS_ENV}={raw:?}: expected a positive integer,                  falling back to the default worker thread count"
+            );
+            None
+        }
+    }
+}
+
+fn configured_worker_threads() -> Option<usize> {
+    parse_worker_threads(&std::env::var(WORKER_THREADS_ENV).ok()?)
+}
+
 fn create_runtime() -> runtime::Runtime {
-    runtime::Builder::new_multi_thread()
-        .enable_all()
-        .thread_name("lancedb-tokio-worker")
-        .build()
-        .expect("Failed to build tokio runtime")
+    let mut builder = runtime::Builder::new_multi_thread();
+    builder.enable_all().thread_name("lancedb-tokio-worker");
+    if let Some(threads) = configured_worker_threads() {
+        builder.worker_threads(threads);
+    }
+    builder.build().expect("Failed to build tokio runtime")
 }
 
 fn get_runtime() -> &'static runtime::Runtime {
@@ -148,4 +179,43 @@ where
     T: for<'py> IntoPyObject<'py> + Send + 'static,
 {
     pyo3_async_runtimes::generic::future_into_py::<LanceRuntime, _, T>(py, fut)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worker_thread_override_accepts_positive_integers() {
+        assert_eq!(parse_worker_threads("4"), Some(4));
+        // Surrounding whitespace is common when the value comes from a
+        // container spec or a shell export.
+        assert_eq!(
+            parse_worker_threads(
+                "  2
+"
+            ),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn unusable_worker_thread_overrides_fall_back_to_the_default() {
+        // Zero would make `Builder::worker_threads` panic, so it must be
+        // rejected here rather than passed through.
+        assert_eq!(parse_worker_threads("0"), None);
+        assert_eq!(parse_worker_threads("-1"), None);
+        assert_eq!(parse_worker_threads("many"), None);
+        assert_eq!(parse_worker_threads(""), None);
+    }
+
+    #[test]
+    fn a_runtime_built_with_an_explicit_worker_count_works() {
+        let rt = runtime::Builder::new_multi_thread()
+            .enable_all()
+            .worker_threads(2)
+            .build()
+            .unwrap();
+        assert_eq!(rt.block_on(async { 21 * 2 }), 42);
+    }
 }
