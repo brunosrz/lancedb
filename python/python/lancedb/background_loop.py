@@ -3,6 +3,7 @@
 
 import asyncio
 import concurrent.futures
+import inspect
 import os
 import threading
 import warnings
@@ -28,6 +29,35 @@ class BackgroundEventLoop:
         self.thread.start()
 
     def run(self, future):
+        # `getattr` rather than `self.thread`: the attribute only exists once
+        # `_start()` has run, and callers may hold a partially constructed
+        # instance. `current_thread()` is never None, so a missing attribute
+        # simply means "not the loop thread" and falls through.
+        if threading.current_thread() is getattr(self, "thread", None):
+            # `run_coroutine_threadsafe` needs this loop to make progress, but
+            # this *is* the thread that drives it, so `.result()` below would
+            # wait on work only this thread could do. Waiting would hang
+            # forever, so fail loudly instead.
+            #
+            # Closing the coroutine first keeps Python from also emitting
+            # "coroutine was never awaited", which under `-W error` would
+            # replace the explanation below with a far less useful error.
+            # Guarded because `run()` is not statically restricted to
+            # coroutines, and only coroutines have `close()`.
+            if inspect.iscoroutine(future):
+                future.close()
+            raise RuntimeError(
+                "lancedb's background event loop was re-entered: a synchronous "
+                "lancedb call was made from inside another one. The usual cause "
+                "is a generator passed to Table.add() or create_table() that "
+                "itself queries lancedb, e.g. "
+                "`yield other_table.search(...).to_arrow()` -- the generator's "
+                "first item is pulled on the background loop thread, so the "
+                "nested call would deadlock. Either materialize the nested "
+                "results first (`rows = [t1.search(...).to_arrow() for ...]` "
+                "then `t2.add(rows)`), or use the async API and await the "
+                "nested query outside the generator."
+            )
         concurrent_future = asyncio.run_coroutine_threadsafe(future, self.loop)
         try:
             return concurrent_future.result()
