@@ -18,8 +18,10 @@ refreshed, rotated, or computed on-demand.
 
 from abc import ABC, abstractmethod
 from typing import Dict, Optional, Callable, Any
+import os
 import time
 import threading
+import weakref
 
 
 class HeaderProvider(ABC):
@@ -92,6 +94,37 @@ class StaticHeaderProvider(HeaderProvider):
         return self._headers.copy()
 
 
+# Providers whose refresh lock must be replaced in a forked child.
+#
+# `_refresh_token_if_needed` holds `_refresh_lock` across the user's
+# `token_fetcher()` call, which is normally an HTTP round trip. That lock is
+# also taken from a tokio worker thread, because the Rust side calls into the
+# Python provider directly rather than through `spawn_blocking`. So whichever
+# thread holds it at fork time is, by construction, not the thread that forked
+# -- and a `threading.Lock` held by a thread that does not exist in the child
+# can never be released there. Every later `get_headers()` in the child would
+# block forever, and since that runs with the GIL held it takes the whole child
+# process down with it.
+#
+# References are weak so registering a provider never keeps it alive.
+_LIVE_OAUTH_PROVIDERS: "weakref.WeakSet[OAuthProvider]" = weakref.WeakSet()
+
+
+def _reset_locks_after_fork() -> None:
+    """Give every live provider a fresh, definitely-unlocked refresh lock.
+
+    Only the forking thread survives into the child, so this cannot race with
+    anything. Discarding whatever state the parent's lock was in is the point:
+    it may be held by a thread that no longer exists.
+    """
+    for provider in _LIVE_OAUTH_PROVIDERS:
+        provider._refresh_lock = threading.Lock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_locks_after_fork)
+
+
 class OAuthProvider(HeaderProvider):
     """Example implementation: OAuth token provider with automatic refresh.
 
@@ -127,6 +160,7 @@ class OAuthProvider(HeaderProvider):
         self._current_token: Optional[str] = None
         self._token_expires_at: Optional[float] = None
         self._refresh_lock = threading.Lock()
+        _LIVE_OAUTH_PROVIDERS.add(self)
 
     def _refresh_token_if_needed(self) -> None:
         """Refresh the token if it's expired or close to expiring."""
