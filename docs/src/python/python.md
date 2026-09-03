@@ -102,6 +102,12 @@ listing a storage directory.
 
 ::: lancedb.job.AsyncJob
 
+## Materialized Views (Synchronous)
+
+::: lancedb.materialized_view.MaterializedView
+
+::: lancedb.materialized_view.MaterializedViewDefinition
+
 ## Expressions
 
 Type-safe expression builder for filters and projections. Use these instead
@@ -152,6 +158,8 @@ and combined with [BooleanQuery][lancedb.query.BooleanQuery].
 ::: lancedb.query.BooleanQuery
 
 ::: lancedb.query.FullTextOperator
+
+::: lancedb.query.DocumentGranularity
 
 ::: lancedb.query.Occur
 
@@ -215,9 +223,13 @@ tokens = list(
 Blob columns store large binary values out of line so they can be read lazily
 instead of being materialized with the rest of the row.
 
-::: lancedb.blob
+`lancedb.BlobType` is `lance.blob.BlobType` when pylance is installed. Without
+pylance, LanceDB uses a matching `lance.blob.v2` extension type so blob columns
+still work. Queries return descriptors. Call
+[`fetch_blob_files`][lancedb.table.Table.fetch_blob_files] for lazy reads or
+[`fetch_blobs`][lancedb.table.Table.fetch_blobs] for eager bytes.
 
-::: lancedb.BlobType
+::: lancedb.blob
 
 ::: lancedb._blob.BlobFile
     options:
@@ -254,6 +266,8 @@ instead of being materialized with the rest of the row.
 ## PyTorch
 
 ::: lancedb.streaming.StreamingDataset
+
+::: lancedb.streaming.StreamingDataLoader
 
 ::: lancedb.permutation.permutation_builder
 
@@ -294,6 +308,10 @@ Table hold your actual data as a collection of records / rows.
 ::: lancedb.table.AsyncTags
 
 ::: lancedb.table.AsyncBranches
+
+## Materialized Views (Asynchronous)
+
+::: lancedb.materialized_view.AsyncMaterializedView
 
 ## Indices (Asynchronous)
 
@@ -338,3 +356,14 @@ rows nearest to a query vector and can be created with the
 ::: lancedb.query.AsyncTakeQuery
     options:
       inherited_members: true
+
+## Runtime lifecycle (advanced)
+
+Using LanceDB creates a Tokio runtime, a background event loop thread and an
+embedding thread pool that are held for the entire life of the process.
+Outside of `fork()` — which does not exist on Windows — nothing recycles
+them. Long-lived hosts that use LanceDB in bursts (test suites, notebook
+kernels, agent runtimes, services that re-index periodically) can release
+them explicitly. Not needed for typical usage.
+
+::: lancedb.background_loop.reset_background_loop
